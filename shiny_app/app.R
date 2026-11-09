@@ -227,7 +227,22 @@ ui <- function(request) navbarPage(
     bg = RAPID_COLORS$white, fg = RAPID_COLORS$soft_black,
     primary = RAPID_COLORS$yellow, secondary = RAPID_COLORS$gray,
     success = "#0ca30c", danger = "#d03b3b",
-    base_font = bslib::font_google(RAPID_FONT_FAMILY, wght = c(400, 500, 600, 700))
+    # A plain font-stack string, not bslib::font_google(): font_google()
+    # reaches out to fonts.googleapis.com over the network as part of
+    # building the theme object. That's fine in a normal server-hosted
+    # Shiny app, but this app also deploys as a static shinylive site,
+    # where the whole app -- including building this theme -- runs
+    # inside the browser's WebAssembly sandbox. That network call
+    # failing/timing out there is fatal: it blocks the entire app from
+    # ever finishing startup (10-second timeout, then a dead page with
+    # no way to retry). A plain string needs no network call at all,
+    # so it can never break startup either way -- Manrope still loads
+    # if the browser already has it some other way, and falls back to
+    # a safe system sans-serif otherwise.
+    base_font = sprintf(
+      "'%s', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+      RAPID_FONT_FAMILY
+    )
   ),
 
   # App-wide styling, passed via navbarPage()'s own `header` argument so
