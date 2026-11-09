@@ -1,0 +1,62 @@
+# Deny-by-default: nothing is tracked unless explicitly un-ignored below.
+# This is deliberate -- the dashboard's repo should only ever contain the
+# small set of files app.R actually needs to start (see shiny_app/app.R's
+# own header comment), never respondent-level data, QC output, or local
+# session state. Adding a new file anywhere does NOT get it committed
+# until someone deliberately adds a "!" rule for it here.
+/*
+!/.gitignore
+
+# shiny_app/: only the files app.R sources + its 2 data symlinks ----
+!/shiny_app/
+/shiny_app/*
+!/shiny_app/app.R
+!/shiny_app/dashboard_helpers.R
+!/shiny_app/dashboard_plots.R
+!/shiny_app/month_range_input.R
+!/shiny_app/R
+!/shiny_app/data_pipeline_output
+
+# R/: only the 4 files app.R actually sources
+# (01_prep.R / 02_weighting.R / 03_domains.R / diagnostics.R touch
+# respondent-level data and are never sourced by the dashboard)
+!/R/
+/R/*
+!/R/00_config.R
+!/R/04_summarize.R
+!/R/05_excel_export.R
+!/R/06_reporting.R
+
+# data_pipeline_output/: only the 4 aggregated .rds files the
+# dashboard reads -- never Excel_Tables/ (not read by app.R)
+!/data_pipeline_output/
+/data_pipeline_output/*
+!/data_pipeline_output/trend_tables.rds
+!/data_pipeline_output/monthly_tables.rds
+!/data_pipeline_output/sample_description.rds
+!/data_pipeline_output/fpl_distribution.rds
+
+# deploy_shinylive.R: the script that builds docs/ below. Not read by
+# app.R itself, but needed to (re)produce the public static site.
+!/deploy_shinylive.R
+
+# docs/: deploy_shinylive.R's generated static-site export (shinylive's
+# WebAssembly bundle, data chunks, index.html) -- what GitHub Pages
+# actually serves, the ONLY thing meant to be public-facing here.
+# Allowed unrestricted (no "/docs/*" deny line, unlike the others
+# above, since gitignore can't re-include files under a directory
+# excluded by a wildcard even with a "**" negation) EXCEPT the 2
+# project markdown docs that happen to already live in this same
+# folder -- those are internal working notes, not part of the
+# dashboard, and were never meant to be public.
+!/docs/
+/docs/README.md
+/docs/FLOW.md
+
+# Never, under any circumstance: respondent-level data, QC output, local
+# session/env state, raw masterfiles.
+internal_qc_output/
+*.RData
+.Rhistory
+.Renviron
+*.sav
