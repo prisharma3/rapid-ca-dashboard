@@ -737,9 +737,19 @@ server <- function(input, output, session) {
   # placeholder. restoreInput() returns the bookmarked value while a
   # restore is in progress and `default` otherwise, so it's a no-op for
   # any normal interaction.
+  # default = "Grouping" (not input$compare_by): every domain offers
+  # "Grouping" as a choice, but "Measure"/"Threshold" are domain-specific
+  # internal codes that happen to collide across domains that both have
+  # a measure or threshold axis. Defaulting to the PREVIOUS domain's
+  # compare_by here meant switching e.g. Child Care (compare_by =
+  # "Measure") -> Material Hardship silently kept compare_by == "Measure"
+  # there too (since "Measure" is also valid for Material Hardship),
+  # drawing one line per hardship type with no obvious indication why --
+  # reported as "why am I seeing all the types" even though "Any" was
+  # still pinned in the now-hidden measure_pin control.
   observeEvent(input$domain, {
     updateSelectInput(session, "compare_by", choices = get_compare_by_choices(input$domain),
-                       selected = shiny::restoreInput(id = "compare_by", default = input$compare_by))
+                       selected = shiny::restoreInput(id = "compare_by", default = "Grouping"))
   })
 
   # Facet by's choices are every other axis this domain has, never the
@@ -748,13 +758,26 @@ server <- function(input, output, session) {
   # text, e.g. "Type" for Material Hardship) -- base::setdiff() drops
   # names on a named vector, so a plain `[` filter is used instead to
   # keep that label intact here too, not just on the Compare by control.
+  # Tracks the domain this observe() last ran for, so facet_by only
+  # resets to "None" on an actual domain switch -- not on every ordinary
+  # within-domain compare_by change, which should keep sticking with
+  # whatever facet_by the user already had (if still valid).
+  prev_domain_for_facet <- reactiveVal(NULL)
   observe({
     req(input$domain, input$compare_by)
     by_axis_choices <- get_compare_by_choices(input$domain)
     remaining <- by_axis_choices[by_axis_choices != input$compare_by]
+    domain_changed <- !identical(prev_domain_for_facet(), input$domain)
+    prev_domain_for_facet(input$domain)
+    # default = "None" only right after a domain switch -- same reasoning
+    # as compare_by above: "None" is always valid, but carrying over the
+    # previous domain's facet_by risked an equally confusing silent
+    # carryover (e.g. a stale "Grouping" facet from a different domain
+    # producing an unexpected faceted layout right after switching).
+    facet_default <- if (domain_changed) "None" else input$facet_by
     updateSelectInput(session, "facet_by",
                        choices = c(None = "None", remaining),
-                       selected = shiny::restoreInput(id = "facet_by", default = input$facet_by))
+                       selected = shiny::restoreInput(id = "facet_by", default = facet_default))
   })
 
   # The Measure pin: shown when this domain has a measure axis and it's
@@ -803,7 +826,11 @@ server <- function(input, output, session) {
     req(input$compare_by, input$facet_by)
     if (input$compare_by == "Grouping" || input$facet_by == "Grouping") return(NULL)
     tagList(
-      selectInput("focus_category", "Focus on", choices = ALL_GROUPING_LABELS, selected = "Overall"),
+      # GROUPING_CHOICES, not ALL_GROUPING_LABELS: "Overall" is always
+      # shown as its own dedicated panel already (the app's left/first
+      # panel, unconditionally), so offering it here too would just
+      # let you pin the focus panel to duplicate that same panel.
+      selectInput("focus_category", "Focus on", choices = GROUPING_CHOICES, selected = GROUPING_CHOICES[[1]]),
       uiOutput("focus_level_ui")
     )
   })
@@ -866,6 +893,16 @@ server <- function(input, output, session) {
     has_threshold_axis <- !is.null(get_threshold_choices(input$domain))
     has_measure_axis   <- !is.null(get_measure_choices(input$domain))
     threshold_label <- if (has_threshold_axis) threshold_code_to_label(input$domain, pins$threshold) else NULL
+    # Same staleness risk as threshold_pin, same fix: pins$measure
+    # falls back to input$measure_pin whenever this isn't a Measure
+    # facet (facet_pins()), and that input keeps whatever value it had
+    # from the last domain that DID have a measure axis once
+    # measure_pin_ui hides for a domain that doesn't -- e.g. switching
+    # to Food Insecurity (no measure axis at all) right after viewing
+    # Material Hardship left every panel titled "Any", a measure Food
+    # Insecurity doesn't have. Only trust pins$measure when this domain
+    # actually has a measure axis to begin with.
+    effective_measure <- if (has_measure_axis) pins$measure else NULL
 
     # input$compare_by has the SAME staleness risk, one level up: right
     # after switching to a domain with no threshold axis at all (e.g.
@@ -883,17 +920,39 @@ server <- function(input, output, session) {
     if (compare_by == "Threshold" && !has_threshold_axis) compare_by <- "Grouping"
     if (compare_by == "Measure" && !has_measure_axis) compare_by <- "Grouping"
 
+    # Whenever NEITHER compare_by nor facet_by is "Grouping" (the exact
+    # condition output$focus_control_ui checks), Grouping is the
+    # leftover axis -- held fixed at whatever "Focus on" category/level
+    # picked, not shown as lines or facets anywhere. Without naming
+    # that pin somewhere, a panel titled e.g. just "All Types" gives no
+    # indication it's actually "...for LA County" or "...for White"
+    # specifically, not every grouping pooled together.
+    is_grouping_focused <- compare_by != "Grouping" && input$facet_by != "Grouping"
+    focus_suffix <- function() {
+      if (is.null(input$focus_category)) return(NULL)
+      if (input$focus_category %in% c("Overall", "LA County")) return(input$focus_category)
+      if (is.null(input$focus_level) || !nzchar(input$focus_level)) return(NULL)
+      sprintf("%s: %s", input$focus_category, input$focus_level)
+    }
+    append_focus <- function(base) {
+      if (!is_grouping_focused) return(base)
+      fs <- focus_suffix()
+      if (is.null(fs)) base else paste0(base, " — ", fs)
+    }
+
     if (compare_by == "Threshold") {
       threshold_list <- paste(names(get_threshold_choices(input$domain)), collapse = " vs ")
-      measure_part <- pins$measure %||% ""
-      if (nzchar(measure_part)) sprintf("%s (%s)", measure_part, threshold_list) else threshold_list
+      measure_part <- effective_measure %||% ""
+      base <- if (nzchar(measure_part)) sprintf("%s (%s)", measure_part, threshold_list) else threshold_list
+      append_focus(base)
     } else if (compare_by == "Measure") {
       all_label <- paste0("All ", measure_axis_label(input$domain), "s")
-      if (!is.null(threshold_label)) sprintf("%s (%s)", all_label, threshold_label) else all_label
+      base <- if (!is.null(threshold_label)) sprintf("%s (%s)", all_label, threshold_label) else all_label
+      append_focus(base)
     } else {
-      parts <- c(pins$measure, threshold_label)
+      parts <- c(effective_measure, threshold_label)
       base <- if (length(parts) == 0) {
-        resolve_domain_figure(input$domain, compare_by, pins$measure, pins$threshold)$figure_title
+        resolve_domain_figure(input$domain, compare_by, effective_measure, pins$threshold)$figure_title
       } else {
         paste(parts, collapse = ", ")
       }
