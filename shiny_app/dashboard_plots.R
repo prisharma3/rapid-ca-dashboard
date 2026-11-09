@@ -10,10 +10,10 @@
 #
 # Plots are registered for "plotly_relayout" events (drag, zoom,
 # double-click reset) under a caller-supplied source id. Paired with
-# get_visible_date_range()/build_window_stats_ui() below, this lets the
-# dashboard show live averages and response/participant counts for
-# whatever window is currently in view. See app.R for how the two are
-# wired together.
+# build_window_stats_ui() below and app.R's record_visible_range(),
+# this lets the dashboard show live averages and response/participant
+# counts for whatever window is currently in view. See app.R for how
+# the two are wired together.
 
 library(dplyr)
 library(plotly)
@@ -185,30 +185,6 @@ parse_relayout_range <- function(relayout_event) {
   if (anyNA(parsed) || parsed[1] > parsed[2]) return(NULL)
   parsed
 }
-
-#' Turn a "plotly_relayout" event payload into a clean, full-months-only
-#' c(min_date, max_date). Falls back to default_range when the payload
-#' can't be parsed, or when it clearly belongs to a different, previously
-#' rendered plot (a parsed range with no overlap at all), since
-#' event_data() otherwise keeps returning the last event even after the
-#' plot under it has changed.
-#' @param relayout_event plotly::event_data("plotly_relayout", ...)'s
-#'   current value, or NULL if nothing has fired yet.
-#' @param default_range c(min_date, max_date) to fall back to.
-get_visible_date_range <- function(relayout_event, default_range) {
-  if (is.null(relayout_event)) return(default_range)
-
-  parsed <- parse_relayout_range(relayout_event)
-  if (is.null(parsed)) return(default_range)
-  if (parsed[2] < default_range[1] || parsed[1] > default_range[2]) return(default_range)
-
-  clamped <- c(max(parsed[1], default_range[1]), min(parsed[2], default_range[2]))
-  snapped <- snap_to_full_months(clamped)
-  # Snapping can push slightly past default_range at either end, so
-  # clamp back down to what the data can actually support.
-  c(max(snapped[1], default_range[1]), min(snapped[2], default_range[2]))
-}
-
 
 #' Render compute_window_stats()'s output as a small HTML stats panel:
 #' one row per level, with the currently visible window's averages,

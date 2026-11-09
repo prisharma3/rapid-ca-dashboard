@@ -1005,19 +1005,78 @@ server <- function(input, output, session) {
     if (is.null(relayout_debouncers[[source_id]])) {
       # suppressWarnings(): plotly warns if a source is polled before
       # its plot has rendered client-side yet; event_data() just
-      # returns NULL, which get_visible_date_range() already treats
-      # as "no event yet".
+      # returns NULL, which record_visible_range()/window_stats_ui()
+      # below already treat as "no event yet".
       raw <- reactive(suppressWarnings(plotly::event_data("plotly_relayout", source = source_id)))
       relayout_debouncers[[source_id]] <- shiny::debounce(raw, DEBOUNCE_MS)
     }
     relayout_debouncers[[source_id]]
   }
 
+  # One entry per source id: the last visible date range actually
+  # KNOWN from a relayout event that carried real range information
+  # (either a parsed custom range, or an explicit autorange reset).
+  # Needed because update_plot_for_window() below pushes a SECOND,
+  # separate plotlyProxy relayout purely to update the plot's title
+  # text (list("title.text" = ...)) every time it fires -- that also
+  # emits its own "plotly_relayout" event on the SAME source id, but
+  # with no range keys at all. Without this tracking (a plain
+  # pure-function lookup from the raw event, with no memory of what
+  # came before, is what this file used to do here), that title-only
+  # echo becomes the debounced reactive's newest value, nothing can
+  # parse any range out of it, it falls back to the full data range,
+  # and the stats panel below the chart briefly (and wrongly) reports
+  # "exact, matches full range" even
+  # though the plot is still showing the snapped custom window the
+  # user actually dragged to. A relayout event that says nothing about
+  # the range should leave whatever was last known untouched, not be
+  # treated as "range unknown, assume full".
+  #
+  # ONLY update_plot_for_window()'s observer below ever WRITES here
+  # (via record_visible_range()); window_stats_ui() only ever READS
+  # it. That split matters, not just tidiness: if window_stats_ui()
+  # (a renderUI) both read AND wrote the same reactiveValues entry, the
+  # write would invalidate the entry it just subscribed to by reading
+  # it, scheduling an extra (and in Shiny, not reliably ordered against
+  # the observer's own write) re-render of itself. Observer-writes /
+  # render-reads avoids that risk entirely, and also means
+  # window_stats_ui() only re-renders once there's an ACTUAL new value
+  # to show, never for a tick that carried no range information at all.
+  last_visible_range <- reactiveValues()
+
+  # One entry per source id: the last title text update_plot_for_window()
+  # actually pushed via plotlyProxy, so it can skip re-pushing an
+  # identical one -- see that function's own comment for why.
+  last_title_set <- reactiveValues()
+
+  #' Called only from update_plot_for_window()'s observer. See
+  #' last_visible_range's own comment above for why a relayout event
+  #' with no parseable range info leaves the stored value untouched.
+  record_visible_range <- function(source_id, relayout_event, default_range) {
+    if (!is.null(relayout_event) && isTRUE(relayout_event[["xaxis.autorange"]])) {
+      last_visible_range[[source_id]] <- NULL
+      return(default_range)
+    }
+    parsed <- parse_relayout_range(relayout_event)
+    # Same "no overlap with this panel's own data at all" guard the
+    # old get_visible_date_range() had, for a stale event that belongs
+    # to a previously rendered, different plot.
+    if (!is.null(parsed) && !(parsed[2] < default_range[1] || parsed[1] > default_range[2])) {
+      clamped <- c(max(parsed[1], default_range[1]), min(parsed[2], default_range[2]))
+      snapped <- snap_to_full_months(clamped)
+      # Snapping can push slightly past default_range at either end,
+      # so clamp back down to what the data can actually support.
+      last_visible_range[[source_id]] <- c(max(snapped[1], default_range[1]), min(snapped[2], default_range[2]))
+    }
+    if (is.null(last_visible_range[[source_id]])) default_range else last_visible_range[[source_id]]
+  }
+
   window_stats_ui <- function(data, series, source_id) {
     if (nrow(data) == 0) return(NULL)
     full_range <- range(data$date, na.rm = TRUE)
-    relayout <- get_debounced_relayout(source_id)()
-    visible_range <- get_visible_date_range(relayout, full_range)
+    # A pure read -- see last_visible_range's comment above for why
+    # this never writes to it.
+    visible_range <- last_visible_range[[source_id]] %||% full_range
     stats <- compute_window_stats(data, series = series, date_range = visible_range)
     build_window_stats_ui(stats, visible_range)
   }
@@ -1050,7 +1109,14 @@ server <- function(input, output, session) {
 
       full_range <- get_full_range()
       if (is.null(full_range) || anyNA(full_range)) return(invisible(NULL))
-      visible_range <- get_visible_date_range(relayout, full_range)
+      # record_visible_range(), not a raw get_visible_date_range() poll:
+      # the title-only proxy call below echoes back as a relayout event
+      # on this same source id with no range keys at all, and this is
+      # the one place authorized to update the shared tracked value --
+      # see last_visible_range's own comment (above window_stats_ui())
+      # for why a range-less event must leave it untouched instead of
+      # resetting to full_range.
+      visible_range <- record_visible_range(source_id, relayout, full_range)
 
       if (!is.null(raw) && !identical(raw, visible_range)) {
         plotly::plotlyProxy(output_id, session) %>%
@@ -1091,8 +1157,17 @@ server <- function(input, output, session) {
         plot_title_html(tc$title, tc$caption),
         "<br><span style=\"font-size:12px; color:#888;\">Window: ", window_label, stats_label, "</span>"
       )
-      plotly::plotlyProxy(output_id, session) %>%
-        plotly::plotlyProxyInvoke("relayout", list("title.text" = new_title))
+      # Only push this if the title actually changed. This proxy call
+      # itself echoes back as a "plotly_relayout" event on this same
+      # source id (same as the range-snap one above) -- pushing it
+      # unconditionally meant that echo would re-trigger this very
+      # observer every time, forever, even once nothing is left to
+      # change, just to re-set an identical title.
+      if (!identical(last_title_set[[source_id]], new_title)) {
+        last_title_set[[source_id]] <- new_title
+        plotly::plotlyProxy(output_id, session) %>%
+          plotly::plotlyProxyInvoke("relayout", list("title.text" = new_title))
+      }
     }, ignoreInit = TRUE)
   }
 
