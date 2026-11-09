@@ -291,7 +291,23 @@ ui <- function(request) navbarPage(
     .navbar-brand { font-weight: 700; letter-spacing: -0.01em; }
     .container-fluid { padding-top: 14px; }
     h3, h4 { font-weight: 600; letter-spacing: -0.01em; }
-  "))),
+  ")),
+    # Plotly can paint its very first chart with a stale/zero width if
+    # that happens before the surrounding bslib/Bootstrap layout (navbar,
+    # sidebar, column grid) has finished settling -- it never repaints
+    # itself afterwards unless something re-triggers it, which is why a
+    # plot showing up blank/black only ever happens on first page load,
+    # and why switching to a different control value and back (forcing a
+    # fresh renderPlotly draw once layout IS settled) fixes it. A single
+    # delayed resize event after Shiny itself reports "connected" makes
+    # every plotly widget on the page recompute its real size once,
+    # without needing the user to touch anything.
+    tags$script(HTML("
+      $(document).on('shiny:connected', function() {
+        setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 600);
+      });
+    "))
+  ),
 
   tabPanel(
     "Trends",
@@ -1107,6 +1123,19 @@ server <- function(input, output, session) {
   # actually pushed via plotlyProxy, so it can skip re-pushing an
   # identical one -- see that function's own comment for why.
   last_title_set <- reactiveValues()
+
+  # Both of the above are keyed by source id (e.g. "overall_plot_src"),
+  # not by domain -- every domain's "Overall" panel reuses the SAME
+  # source id. Without this reset, a custom zoom/pan left over from a
+  # PREVIOUS domain's plot (or even just that plot's own initial-autorange
+  # relayout echo) kept being read as "the visible window" on whatever
+  # domain you switched to next, making window_stats_ui() wrongly report
+  # the "approximate" note right after switching domains even though the
+  # new domain's own window was never touched.
+  observeEvent(input$domain, {
+    for (nm in names(reactiveValuesToList(last_visible_range))) last_visible_range[[nm]] <- NULL
+    for (nm in names(reactiveValuesToList(last_title_set)))    last_title_set[[nm]]    <- NULL
+  })
 
   #' Called only from update_plot_for_window()'s observer. See
   #' last_visible_range's own comment above for why a relayout event
