@@ -19,15 +19,12 @@
 
 # R/: only the 4 files app.R actually sources
 # (01_prep.R / 02_weighting.R / 03_domains.R / diagnostics.R touch
-# respondent-level data and are never sourced by the dashboard;
-# 05_excel_export.R itself isn't sourced either -- the dashboard only
-# needs the plain constants split out into domain_outcome_vars.R, so
-# it never has to load openxlsx just to read those)
+# respondent-level data and are never sourced by the dashboard)
 !/R/
 /R/*
 !/R/00_config.R
 !/R/04_summarize.R
-!/R/domain_outcome_vars.R
+!/R/05_excel_export.R
 !/R/06_reporting.R
 
 # data_pipeline_output/: only the 4 aggregated .rds files the

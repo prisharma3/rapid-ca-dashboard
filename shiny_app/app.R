@@ -56,13 +56,7 @@ library(DT)
 
 source("R/00_config.R")
 source("R/04_summarize.R")
-# Not R/05_excel_export.R: the dashboard only needs the outcome-column
-# constants that file defines (MATERIAL_HARDSHIP_TYPES and friends),
-# never its actual Excel-writing code -- which means it never needs
-# openxlsx either, a real package the dashboard was otherwise paying
-# to load on every single page load for nothing. See
-# R/domain_outcome_vars.R's own header for the full story.
-source("R/domain_outcome_vars.R")
+source("R/05_excel_export.R")
 source("R/06_reporting.R")
 source("dashboard_helpers.R")
 source("dashboard_plots.R")
