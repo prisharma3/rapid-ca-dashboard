@@ -785,12 +785,18 @@ server <- function(input, output, session) {
     remaining <- by_axis_choices[by_axis_choices != input$compare_by]
     domain_changed <- !identical(prev_domain_for_facet(), input$domain)
     prev_domain_for_facet(input$domain)
-    # default = "None" only right after a domain switch -- same reasoning
-    # as compare_by above: "None" is always valid, but carrying over the
-    # previous domain's facet_by risked an equally confusing silent
-    # carryover (e.g. a stale "Grouping" facet from a different domain
-    # producing an unexpected faceted layout right after switching).
-    facet_default <- if (domain_changed) "None" else input$facet_by
+    # default = "None" on a domain switch (same reasoning as compare_by
+    # above), OR whenever the CURRENT facet_by value is no longer among
+    # the valid choices for whatever compare_by just became -- e.g.
+    # compare_by changing TO "Grouping" while facet_by was already
+    # sitting on "Grouping" (a leftover from when compare_by was
+    # something else) must not leave facet_by on "Grouping" too: that
+    # produced two controls both claiming the Grouping axis at once,
+    # and get_facet_panel_data() then returned the exact same
+    # all-levels-as-lines data for every facet panel instead of each
+    # facet's own single level.
+    facet_still_valid <- isTRUE(input$facet_by == "None") || input$facet_by %in% remaining
+    facet_default <- if (domain_changed || !facet_still_valid) "None" else input$facet_by
     updateSelectInput(session, "facet_by",
                        choices = c(None = "None", remaining),
                        selected = shiny::restoreInput(id = "facet_by", default = facet_default))
@@ -943,7 +949,15 @@ server <- function(input, output, session) {
     # that pin somewhere, a panel titled e.g. just "All Types" gives no
     # indication it's actually "...for LA County" or "...for White"
     # specifically, not every grouping pooled together.
-    is_grouping_focused <- compare_by != "Grouping" && input$facet_by != "Grouping"
+    # The "Overall" panel (get_facet_panel_data()'s facet_value ==
+    # "Overall" branch) always queries the TRUE, unfiltered overall --
+    # it never applies the Focus-on pin as a filter, by design, so its
+    # title must never claim it did either. Without this check, picking
+    # a Focus level made the Overall panel's own title say "-- Race:
+    # Black" even though its data was still every race pooled together,
+    # which read as if "Overall" had silently been replaced.
+    is_grouping_focused <- compare_by != "Grouping" && input$facet_by != "Grouping" &&
+      !identical(facet_value, "Overall")
     focus_suffix <- function() {
       if (is.null(input$focus_category)) return(NULL)
       if (input$focus_category %in% c("Overall", "LA County")) return(input$focus_category)
@@ -1012,17 +1026,25 @@ server <- function(input, output, session) {
         outcome_label = resolved$outcome_label, date_range = dr
       ))
     }
-    if (input$compare_by == "Grouping") {
-      req(input$compare_grouping)
-      return(prepare_grouping_panel_data(
-        trend_tables, input$domain, resolved$figure_title, input$compare_grouping,
-        outcome_label = resolved$outcome_label, date_range = dr
-      ))
-    }
+    # Checked BEFORE compare_by == "Grouping" below: that branch has no
+    # idea which facet panel it's being asked for at all (it always
+    # returns the SAME "every level as its own line" data regardless of
+    # facet_value), which is fine when it's genuinely the only
+    # Grouping-shaped axis in play, but wrong whenever THIS facet panel
+    # is itself pinned to one specific grouping level -- that case needs
+    # to win, or every facet panel (Black/Latinx/...) renders the exact
+    # same all-races-as-lines plot instead of its own single line.
     if (!is.null(facet_value) && input$facet_by == "Grouping") {
       req(input$facet_grouping)
       return(prepare_pinned_level_panel_data(
         trend_tables, input$domain, resolved$figure_title, input$facet_grouping, facet_value,
+        outcome_label = resolved$outcome_label, date_range = dr
+      ))
+    }
+    if (input$compare_by == "Grouping") {
+      req(input$compare_grouping)
+      return(prepare_grouping_panel_data(
+        trend_tables, input$domain, resolved$figure_title, input$compare_grouping,
         outcome_label = resolved$outcome_label, date_range = dr
       ))
     }
