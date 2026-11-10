@@ -337,9 +337,11 @@ ui <- function(request) navbarPage(
         }
         .kpi-toggle-header:hover .kpi-toggle-label { background-color: #f5f5f5; }
         #trends_kpi_area .nav-tabs .nav-link,
-        #sample_desc_tabs_area .nav-tabs .nav-link { color: #555; border: none; }
+        #sample_desc_tabs_area .nav-tabs .nav-link,
+        #sample_geo_scope .nav-link { color: #555; border: none; }
         #trends_kpi_area .nav-tabs .nav-link.active,
-        #sample_desc_tabs_area .nav-tabs .nav-link.active {
+        #sample_desc_tabs_area .nav-tabs .nav-link.active,
+        #sample_geo_scope .nav-link.active {
           background-color: #D4AF00; color: #1a1a1a; font-weight: 600; border: none;
         }
       "))
