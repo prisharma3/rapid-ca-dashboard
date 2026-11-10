@@ -200,7 +200,17 @@ summarize_sample_description_unit <- function(sample_description, unit, grouping
     dplyr::transmute(
       Category = grouping,
       Level    = level,
-      `N (%)`  = sprintf("%s (%.1f%%)", format(n_participants, big.mark = ",", trim = TRUE), pct)
+      # Source has far more levels (dozens) than every other category,
+      # and some of them have only a handful of respondents in any one
+      # time cut -- showing an exact small count and its percent there
+      # is both unreliable and a privacy concern, so those collapse to
+      # "< 10" with no percent. Dashboard-only: the Excel exports
+      # (R/05_excel_export.R's write_sample_description_sheet()) are a
+      # completely separate code path and are untouched by this.
+      `N (%)`  = dplyr::case_when(
+        grouping == "Source" & n_participants < 10 ~ "< 10",
+        TRUE ~ sprintf("%s (%.1f%%)", format(n_participants, big.mark = ",", trim = TRUE), pct)
+      )
     )
 }
 
