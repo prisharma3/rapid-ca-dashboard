@@ -70,9 +70,18 @@ DOMAIN_FIGURES <- list(
 )
 
 # Every grouping label a report/dashboard/pipeline consumer should
-# offer, in order: Overall, then each demographic grouping, then LA
-# County.
-ALL_GROUPING_LABELS <- c("Overall", names(GROUPING_VARS), "LA County")
+# offer, in order: Overall, then each demographic grouping, then
+# Source. LA County is NOT here -- it's a geography scope (see `geo`
+# on every trend/sample-description row), not a grouping breakdown, so
+# it no longer competes with Race/Age/etc. as a single pinned level
+# that can't itself be broken down further.
+ALL_GROUPING_LABELS <- c("Overall", names(GROUPING_VARS), "Source")
+
+# The two geography scopes every trend/monthly/sample-description row
+# is tagged with (see the build_*_by_geo() wrappers below). A plain
+# top-level toggle, not a grouping -- every grouping breakdown
+# (Race, Source, etc.) exists within EACH of these, independently.
+GEO_SCOPE_CHOICES <- c("CA Statewide", "LA County")
 
 
 
@@ -288,24 +297,53 @@ resolve_domain_figure <- function(domain_key, compare_by, measure_pin = NULL, th
 # optionally faceted by outcome" without also handling an arbitrary
 # grouping variable.
 
-# @param df master_core after every domain outcome has been added.
+# @param df master_core after every domain outcome has been added
+#   (already filtered to one geography's respondents -- this function
+#   has no idea which geography it is, see `geo` below).
 # @param grouping_label One of ALL_GROUPING_LABELS.
+# @param geo "CA Statewide" or "LA County" -- only matters for the
+#   "Overall" branch: LA County's Overall has always used the
+#   subgroup threshold (30/90), not the true overall one (50/100),
+#   matching how LA County was treated as a geography filter even
+#   before it became its own geo scope. Every other grouping tab
+#   already uses the subgroup threshold regardless of geography, so
+#   this parameter changes nothing for them.
 # @return A named list; each element is list(data = <filtered df>,
 #   min_n = <monthly suppression threshold for this cut>, rolling_min_n
 #   = <cumulative 3-month rolling threshold>).
-resolve_grouping_levels <- function(df, grouping_label) {
+resolve_grouping_levels <- function(df, grouping_label, geo = "CA Statewide") {
   if (grouping_label == "Overall") {
-    return(list(Overall = list(data = df, min_n = N_MIN_OVERALL, rolling_min_n = ROLLING_MIN_OVERALL)))
+    min_n         <- if (geo == "CA Statewide") N_MIN_OVERALL        else N_MIN_SUBGROUP
+    rolling_min_n <- if (geo == "CA Statewide") ROLLING_MIN_OVERALL  else ROLLING_MIN_SUBGROUP
+    return(list(Overall = list(data = df, min_n = min_n, rolling_min_n = rolling_min_n)))
   }
-  if (grouping_label == "LA County") {
-    # Uses the subgroup threshold (30), not the overall one (50),
-    # matching how LA County is treated for Healthcare and Food
-    # Insecurity in the production reference script. It's still always
-    # exactly one level, unlike a real demographic grouping's several
-    # levels, which is unrelated to which threshold applies.
-    return(list(`LA County` = list(
-      data = dplyr::filter(df, la_county == 1), min_n = N_MIN_SUBGROUP, rolling_min_n = ROLLING_MIN_SUBGROUP
-    )))
+  if (grouping_label == "Source") {
+    # Source (which survey/panel administration, e.g. "LAEP") isn't in
+    # GROUPING_VARS -- it's a plain column directly on df, same one
+    # sample_description_breakdown() already reads -- so it needs its
+    # own branch here rather than the GROUPING_VARS lookup below. Its
+    # own, lower suppression bar (N_MIN_SOURCE/ROLLING_MIN_SOURCE) is
+    # in 00_config.R, since some sources have far fewer respondents in
+    # any given month than a demographic subgroup typically does.
+    # !is.na() alone isn't enough here: a genuinely blank (empty
+    # string, not NA) Source value would become a level NAMED "" below
+    # -- and list[[""]] always returns NULL in R, even for an element
+    # that really is named "" (a longstanding R `[[` quirk, distinct
+    # from how a real, non-empty name behaves). That NULL then flows
+    # all the way down into calc_multi_trend()'s df argument and blows
+    # up with "no applicable method for 'filter' applied to an object
+    # of class NULL" several calls later, with no indication it was
+    # ever about an empty string to begin with. nzchar() excludes "" the
+    # same way is.na() excludes NA, so neither kind of non-value ever
+    # becomes a level.
+    raw_source <- as.character(df$Source)
+    levels_present <- sort(unique(raw_source[!is.na(raw_source) & nzchar(raw_source)]))
+    return(stats::setNames(
+      lapply(levels_present, function(lvl) {
+        list(data = dplyr::filter(df, Source == lvl), min_n = N_MIN_SOURCE, rolling_min_n = ROLLING_MIN_SOURCE)
+      }),
+      levels_present
+    ))
   }
 
   group_col <- GROUPING_VARS[[grouping_label]]
@@ -412,12 +450,12 @@ finish_trend_cut <- function(cut, keep_field, na_suppressed_monthly_prop) {
 # resolve_grouping_levels() doesn't depend on domain_key, so it's
 # computed once per grouping_label here, not once per domain, which
 # would recompute the same level split 6 times over.
-build_trend_cut_work_items <- function(master_analysis, domain_keys, grouping_labels, verbose) {
+build_trend_cut_work_items <- function(master_analysis, domain_keys, grouping_labels, verbose, geo = "CA Statewide") {
   t0 <- Sys.time()
   work_items <- list()
   for (grouping_label in grouping_labels) {
     t_level0 <- Sys.time()
-    levels_to_use <- resolve_grouping_levels(master_analysis, grouping_label)
+    levels_to_use <- resolve_grouping_levels(master_analysis, grouping_label, geo = geo)
     level_elapsed <- as.numeric(difftime(Sys.time(), t_level0, units = "secs"))
     if (verbose) {
       cat("  [", grouping_label, "]", length(levels_to_use), "level(s)",
@@ -468,7 +506,31 @@ run_trend_cuts_parallel <- function(work_items, caller_name, verbose = FALSE) {
       cat(sprintf("     [%s] %d/%d cuts started, %.1f sec elapsed\n",
                   caller_name, i, n_items, as.numeric(difftime(Sys.time(), t0, units = "secs"))))
     }
-    compute_one_trend_cut(w$domain_key, w$fig, w$grouping_label, w$level_name, w$level_info)
+    # Caught here, with the identifying (domain, grouping, level)
+    # attached to the condition, rather than relying on mclapply's own
+    # try(silent = TRUE) wrapper: that one just captures whatever
+    # condition$message already says, which for an error that
+    # originated inside a purrr::map()/imap() call (calc_multi_trend()'s
+    # per-outcome loop, used by every multi-measure domain) is often
+    # just a terse "In index: N." with the actual cause several lines
+    # up in a `cnd_message()`-style chain that a plain $message never
+    # unwraps. tryCatch()+rlang::cnd_message() here gets the full
+    # chain, and pasting on which (domain, grouping, level) cut it was
+    # means a failure is traceable without having to re-run serially
+    # just to find out which cut broke.
+    tryCatch(
+      compute_one_trend_cut(w$domain_key, w$fig, w$grouping_label, w$level_name, w$level_info),
+      error = function(e) {
+        structure(
+          list(
+            domain_key = w$domain_key, fig_title = w$fig$title,
+            grouping_label = w$grouping_label, level_name = w$level_name,
+            message = rlang::cnd_message(e, prefix = TRUE)
+          ),
+          class = "trend_cut_error"
+        )
+      }
+    )
   }, mc.cores = PIPELINE_CORES)
   elapsed <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
   if (verbose) {
@@ -476,12 +538,24 @@ run_trend_cuts_parallel <- function(work_items, caller_name, verbose = FALSE) {
                 elapsed, elapsed / max(1, n_items)))
   }
 
-  # mclapply() returns a try-error object per failed item rather than
-  # halting the other items.
-  failed <- vapply(results, function(x) inherits(x, "try-error"), logical(1))
+  # mclapply() can ALSO still produce a plain try-error itself (e.g. a
+  # forked worker crashing outright, not caught by the tryCatch above
+  # at all) -- checked separately from trend_cut_error so either kind
+  # of failure gets reported, not just the one this function added.
+  is_failure <- function(x) inherits(x, "trend_cut_error") || inherits(x, "try-error")
+  failed <- vapply(results, is_failure, logical(1))
   if (any(failed)) {
-    stop(caller_name, "() failed on at least one cut.\nFirst error: ",
-         attr(results[failed][[1]], "condition")$message)
+    descriptions <- vapply(results[failed], function(x) {
+      if (inherits(x, "trend_cut_error")) {
+        sprintf("  - domain=%s, figure=%s, grouping=%s, level=%s:\n    %s",
+                x$domain_key, x$fig_title, x$grouping_label, x$level_name, x$message)
+      } else {
+        sprintf("  - (cut identity unknown -- mclapply-level failure, not caught by this function's own tryCatch):\n    %s",
+                attr(x, "condition")$message)
+      }
+    }, character(1))
+    stop(sprintf("%s() failed on %d of %d cut(s):\n%s",
+                 caller_name, sum(failed), n_items, paste(descriptions, collapse = "\n")))
   }
 
   results
@@ -503,8 +577,8 @@ bind_finished_cuts <- function(cuts, keep_field, na_suppressed_monthly_prop) {
 build_all_trend_tables <- function(master_analysis,
                                     domain_keys = names(DOMAIN_FIGURES),
                                     grouping_labels = ALL_GROUPING_LABELS,
-                                    verbose = FALSE) {
-  work_items <- build_trend_cut_work_items(master_analysis, domain_keys, grouping_labels, verbose)
+                                    verbose = FALSE, geo = "CA Statewide") {
+  work_items <- build_trend_cut_work_items(master_analysis, domain_keys, grouping_labels, verbose, geo = geo)
   cuts <- run_trend_cuts_parallel(work_items, caller_name = "build_all_trend_tables", verbose = verbose)
   bind_finished_cuts(cuts, keep_field = "rolling", na_suppressed_monthly_prop = TRUE)
 }
@@ -528,8 +602,8 @@ build_all_trend_tables <- function(master_analysis,
 build_all_monthly_tables <- function(master_analysis,
                                       domain_keys = names(DOMAIN_FIGURES),
                                       grouping_labels = ALL_GROUPING_LABELS,
-                                      verbose = FALSE) {
-  work_items <- build_trend_cut_work_items(master_analysis, domain_keys, grouping_labels, verbose)
+                                      verbose = FALSE, geo = "CA Statewide") {
+  work_items <- build_trend_cut_work_items(master_analysis, domain_keys, grouping_labels, verbose, geo = geo)
   cuts <- run_trend_cuts_parallel(work_items, caller_name = "build_all_monthly_tables", verbose = verbose)
   bind_finished_cuts(cuts, keep_field = "monthly_all", na_suppressed_monthly_prop = FALSE)
 }
@@ -545,13 +619,53 @@ build_all_monthly_tables <- function(master_analysis,
 build_all_trend_and_monthly_tables <- function(master_analysis,
                                                 domain_keys = names(DOMAIN_FIGURES),
                                                 grouping_labels = ALL_GROUPING_LABELS,
-                                                verbose = FALSE) {
-  work_items <- build_trend_cut_work_items(master_analysis, domain_keys, grouping_labels, verbose)
+                                                verbose = FALSE, geo = "CA Statewide") {
+  work_items <- build_trend_cut_work_items(master_analysis, domain_keys, grouping_labels, verbose, geo = geo)
   cuts <- run_trend_cuts_parallel(work_items, caller_name = "build_all_trend_and_monthly_tables", verbose = verbose)
   list(
     trend_tables   = bind_finished_cuts(cuts, keep_field = "rolling", na_suppressed_monthly_prop = TRUE),
     monthly_tables = bind_finished_cuts(cuts, keep_field = "monthly_all", na_suppressed_monthly_prop = FALSE),
     cuts           = cuts
+  )
+}
+
+#' build_all_trend_and_monthly_tables(), once for all of CA and once
+#' for the LA-county-only subset (la_county == 1 on master_analysis),
+#' so every grouping breakdown (Race, Source, etc.) is available WITHIN
+#' LA County too -- not just one pinned "LA County" line with no
+#' further breakdown, which is how this worked before LA County had its
+#' own geography scope. Reuses build_all_trend_and_monthly_tables()
+#' completely unchanged, just called twice on two different input
+#' slices; the only new work here is tagging each output with `geo`
+#' ("CA Statewide"/"LA County") and stacking the two together.
+#'
+#' `cuts`/`cuts_la` are kept SEPARATE, not combined like the two tables
+#' are: R/05_excel_export.R's combine_cut_levels() looks a cut up by
+#' (domain_key, figure_title, grouping_label) alone, with no `geo` of
+#' its own to filter on, so each geography's Excel export needs that
+#' geography's own, separate cut list to look up from.
+#' @return list(trend_tables = <geo-tagged, combined>, monthly_tables
+#'   = <geo-tagged, combined>, cuts = <CA-only, for Excel export>,
+#'   cuts_la = <LA-County-only, for Excel export>).
+build_all_trend_and_monthly_tables_by_geo <- function(master_analysis,
+                                                        domain_keys = names(DOMAIN_FIGURES),
+                                                        grouping_labels = ALL_GROUPING_LABELS,
+                                                        verbose = FALSE) {
+  ca <- build_all_trend_and_monthly_tables(master_analysis, domain_keys, grouping_labels, verbose, geo = "CA Statewide")
+  la <- build_all_trend_and_monthly_tables(
+    dplyr::filter(master_analysis, la_county == 1), domain_keys, grouping_labels, verbose, geo = "LA County"
+  )
+  list(
+    trend_tables = dplyr::bind_rows(
+      dplyr::mutate(ca$trend_tables, geo = "CA Statewide"),
+      dplyr::mutate(la$trend_tables, geo = "LA County")
+    ),
+    monthly_tables = dplyr::bind_rows(
+      dplyr::mutate(ca$monthly_tables, geo = "CA Statewide"),
+      dplyr::mutate(la$monthly_tables, geo = "LA County")
+    ),
+    cuts    = ca$cuts,
+    cuts_la = la$cuts
   )
 }
 
@@ -643,6 +757,26 @@ build_sample_description_table <- function(master_analysis) {
   list(overall = overall_tbl, by_month = by_month_tbl, by_survey = by_survey_tbl)
 }
 
+#' build_sample_description_table(), once for CA, once for LA County,
+#' tagged with the same `geo` column as the trend tables -- so the
+#' dashboard's Sample Description tab can split into a "CA Statewide"
+#' tab and an "LA County" tab the same way the Trends tab splits.
+build_sample_description_table_by_geo <- function(master_analysis) {
+  ca <- build_sample_description_table(master_analysis)
+  la <- build_sample_description_table(dplyr::filter(master_analysis, la_county == 1))
+  list(
+    overall = dplyr::bind_rows(
+      dplyr::mutate(ca$overall, geo = "CA Statewide"), dplyr::mutate(la$overall, geo = "LA County")
+    ),
+    by_month = dplyr::bind_rows(
+      dplyr::mutate(ca$by_month, geo = "CA Statewide"), dplyr::mutate(la$by_month, geo = "LA County")
+    ),
+    by_survey = dplyr::bind_rows(
+      dplyr::mutate(ca$by_survey, geo = "CA Statewide"), dplyr::mutate(la$by_survey, geo = "LA County")
+    )
+  )
+}
+
 # A fine-grained FPL_CONT_locf histogram, one row per (month, bin), at
 # a fixed 5-point bin width from 0 to 500% plus one "above 500%"
 # catch-all. Pre-aggregated counts within a narrow band, not individual
@@ -699,6 +833,27 @@ build_fpl_distribution_table <- function(master_analysis) {
     participants_by_year  = valid %>%
       dplyr::group_by(survey_year) %>%
       dplyr::summarise(n_participants = dplyr::n_distinct(CALID), .groups = "drop")
+  )
+}
+
+#' build_fpl_distribution_table(), once for CA, once for LA County.
+#' `bins`/`participants_by_year` get the same `geo` column as the other
+#' by-geo tables, since both are already data frames; the two single
+#' numbers in `participants_overall` become a geo-named list instead
+#' (`list(\`CA Statewide\` = ..., \`LA County\` = ...)`), since there's
+#' no row to tag a bare scalar onto.
+build_fpl_distribution_table_by_geo <- function(master_analysis) {
+  ca <- build_fpl_distribution_table(master_analysis)
+  la <- build_fpl_distribution_table(dplyr::filter(master_analysis, la_county == 1))
+  list(
+    bins = dplyr::bind_rows(
+      dplyr::mutate(ca$bins, geo = "CA Statewide"), dplyr::mutate(la$bins, geo = "LA County")
+    ),
+    participants_overall = list(`CA Statewide` = ca$participants_overall, `LA County` = la$participants_overall),
+    participants_by_year = dplyr::bind_rows(
+      dplyr::mutate(ca$participants_by_year, geo = "CA Statewide"),
+      dplyr::mutate(la$participants_by_year, geo = "LA County")
+    )
   )
 }
 
@@ -793,15 +948,19 @@ compute_window_stats <- function(panel_data, series = c("monthly", "rolling"), d
 }
 
 #' Filter a trend-tables object to exactly one domain/figure/grouping/
-#' level/date-range selection.
+#' level/geography/date-range selection. `geo` defaults to "CA
+#' Statewide" so every call site written before LA County became a
+#' geography scope keeps its old (CA-wide) behavior unless it
+#' deliberately opts into "LA County".
 filter_trend_data <- function(trend_tables, domain_key, figure_title, grouping_label, level_name,
-                               date_range = NULL) {
+                               date_range = NULL, geo = "CA Statewide") {
   out <- trend_tables %>%
     dplyr::filter(
       domain == domain_key,
       figure_title == !!figure_title,
       grouping == grouping_label,
-      level == level_name
+      level == level_name,
+      geo == .env$geo
     )
   if (!is.null(date_range)) {
     out <- out %>% dplyr::filter(date >= date_range[1], date <= date_range[2])
@@ -1047,12 +1206,13 @@ figure_outcome_order <- function(domain_key, figure_title) {
 #' Measure or Threshold rather than Grouping.
 #'
 #' @param grouping_label,level_name The grouping and the one level to
-#'   pin to (equal to each other for Overall/LA County, since those
-#'   groupings only ever have one level).
+#'   pin to (equal to each other for "Overall", the only grouping
+#'   that's always exactly one level).
+#' @param geo "CA Statewide" or "LA County" -- see GEO_SCOPE_CHOICES.
 prepare_pinned_level_panel_data <- function(trend_tables, domain_key, figure_title, grouping_label, level_name,
-                                              outcome_label = NULL, date_range = NULL) {
+                                              outcome_label = NULL, date_range = NULL, geo = "CA Statewide") {
   out <- filter_trend_data(trend_tables, domain_key, figure_title, grouping_label, level_name,
-                            date_range = date_range)
+                            date_range = date_range, geo = geo)
   if (!is.null(outcome_label)) {
     out <- dplyr::filter(out, outcome == outcome_label)
   } else if (nrow(out) > 0 && !all(is.na(out$outcome))) {
@@ -1062,19 +1222,19 @@ prepare_pinned_level_panel_data <- function(trend_tables, domain_key, figure_tit
   out
 }
 
-#' Overall and LA County are the only two groupings that are always
-#' exactly one level, so grouping_label doubles as the level name for
-#' both.
+#' "Overall" is the only grouping that's always exactly one level, so
+#' grouping_label doubles as the level name here.
 prepare_single_level_panel_data <- function(trend_tables, domain_key, figure_title, grouping_label,
-                                              outcome_label = NULL, date_range = NULL) {
+                                              outcome_label = NULL, date_range = NULL, geo = "CA Statewide") {
   prepare_pinned_level_panel_data(trend_tables, domain_key, figure_title, grouping_label, grouping_label,
-                                    outcome_label = outcome_label, date_range = date_range)
+                                    outcome_label = outcome_label, date_range = date_range, geo = geo)
 }
 
 #' The Overall panel's data specifically, for callers that only ever
-#' want Overall, never LA County, as their fixed reference panel.
-prepare_overall_panel_data <- function(trend_tables, domain_key, figure_title, date_range = NULL) {
-  prepare_single_level_panel_data(trend_tables, domain_key, figure_title, "Overall", date_range = date_range)
+#' want the Overall grouping (within whichever geography), as their
+#' fixed reference panel.
+prepare_overall_panel_data <- function(trend_tables, domain_key, figure_title, date_range = NULL, geo = "CA Statewide") {
+  prepare_single_level_panel_data(trend_tables, domain_key, figure_title, "Overall", date_range = date_range, geo = geo)
 }
 
 #' A subgroup-breakdown panel's data: every level of grouping_label
@@ -1083,9 +1243,9 @@ prepare_overall_panel_data <- function(trend_tables, domain_key, figure_title, d
 #' also be filtered to exactly one measure, since every measure times
 #' every subgroup level at once would be unreadable.
 prepare_grouping_panel_data <- function(trend_tables, domain_key, figure_title, grouping_label,
-                                          outcome_label = NULL, date_range = NULL) {
+                                          outcome_label = NULL, date_range = NULL, geo = "CA Statewide") {
   out <- trend_tables %>%
-    dplyr::filter(domain == domain_key, figure_title == !!figure_title, grouping == grouping_label)
+    dplyr::filter(domain == domain_key, figure_title == !!figure_title, grouping == grouping_label, geo == .env$geo)
   if (!is.null(outcome_label)) {
     out <- out %>% dplyr::filter(outcome == outcome_label)
   }
@@ -1122,17 +1282,18 @@ prepare_grouping_panel_data <- function(trend_tables, domain_key, figure_title, 
 build_plot_caption <- function(data, grouping_label, series = c("monthly", "rolling")) {
   series <- match.arg(series)
   is_overall <- grouping_label == "Overall"
+  is_source  <- grouping_label == "Source"
   if (series == "monthly") {
     # One month: a respondent answers at most once, so "respondents"
     # and "responses" are the same number here.
-    min_n <- if (is_overall) N_MIN_OVERALL else N_MIN_SUBGROUP
+    min_n <- if (is_overall) N_MIN_OVERALL else if (is_source) N_MIN_SOURCE else N_MIN_SUBGROUP
     sprintf("Months with fewer than %d respondents are excluded.", min_n)
   } else {
     # 3 months: rolling_n sums each month's own response count
     # (calc_rolling_avg(), R/04_summarize.R), so this total can include
     # the same person more than once if they answered in more than one
     # of the 3 months -- "responses," not "respondents".
-    rolling_min_n <- if (is_overall) ROLLING_MIN_OVERALL else ROLLING_MIN_SUBGROUP
+    rolling_min_n <- if (is_overall) ROLLING_MIN_OVERALL else if (is_source) ROLLING_MIN_SOURCE else ROLLING_MIN_SUBGROUP
     sprintf("Shown only when the 3-month cumulative total is at least %d responses.", rolling_min_n)
   }
 }

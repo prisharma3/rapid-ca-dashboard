@@ -415,6 +415,13 @@ ui <- function(request) navbarPage(
         "Monthly and 3-Month Rolling are weighted estimates."),
       fluidRow(
         column(3, id = "trends_sidebar_col",
+          # A top-level scope, not a grouping: every grouping breakdown
+          # below (Race, Source, etc.) exists within EACH of these
+          # independently, so switching this never limits which
+          # groupings are available -- unlike the old "LA County" pinned
+          # grouping value, which was always exactly one line with no
+          # further breakdown possible.
+          selectInput("geo_scope", "Geography", choices = GEO_SCOPE_CHOICES),
           selectInput("domain", "Domain", choices = DOMAIN_CHOICES),
           hr(),
           tags$div(
@@ -674,6 +681,21 @@ ui <- function(request) navbarPage(
         )  # /app-sidebar-scroll
       ),
       mainPanel(
+        # Geography scope, as actual tabs rather than a dropdown, per
+        # the Trends tab's Geography control having the same two
+        # choices. These two tabPanel()s carry no content of their own
+        # -- they exist purely so input$sample_geo_scope reports which
+        # one is active, which the Table/FPL Histogram tabs below read
+        # reactively. Keeping it this way (one shared Table/FPL
+        # Histogram tabset, reading a geo value) avoids duplicating the
+        # whole Table A/B/C sidebar and FPL chart controls into two full
+        # copies, which would double the surface area for something to
+        # drift out of sync between the two geographies.
+        tabsetPanel(
+          id = "sample_geo_scope",
+          tabPanel("CA Statewide"),
+          tabPanel("LA County")
+        ),
         tags$div(
           id = "sample_desc_tabs_area",
           tabsetPanel(
@@ -711,10 +733,10 @@ ui <- function(request) navbarPage(
       "using ACS 2020-2024 5 year target estimates (Raking: race, poverty, CA region). ",
       sprintf(
         paste0(
-          "Monthly minimum sample size: %d respondents overall, %d within a subgroup. ",
-          "3-Month Rolling minimum cumulative sample size (summed across the 3 months): %d respondents overall, %d within a subgroup."
+          "Monthly minimum sample size: %d respondents overall, %d within a subgroup, %d within a single source. ",
+          "3-Month Rolling minimum cumulative sample size (summed across the 3 months): %d respondents overall, %d within a subgroup, %d within a single source."
         ),
-        N_MIN_OVERALL, N_MIN_SUBGROUP, ROLLING_MIN_OVERALL, ROLLING_MIN_SUBGROUP
+        N_MIN_OVERALL, N_MIN_SUBGROUP, N_MIN_SOURCE, ROLLING_MIN_OVERALL, ROLLING_MIN_SUBGROUP, ROLLING_MIN_SOURCE
       )
     ),
     tags$div(class = "methodology-grid", methodology_cards())
@@ -859,9 +881,9 @@ server <- function(input, output, session) {
 
   # Only a real subgroup needs a second "which level" dropdown.
   output$focus_level_ui <- renderUI({
-    req(input$domain, input$focus_category)
-    if (input$focus_category %in% c("Overall", "LA County")) return(NULL)
-    levels_present <- get_levels_for_grouping(trend_tables, input$domain, input$focus_category)
+    req(input$domain, input$focus_category, input$geo_scope)
+    if (input$focus_category == "Overall") return(NULL)
+    levels_present <- get_levels_for_grouping(trend_tables, input$domain, input$focus_category, geo = input$geo_scope)
     selectInput("focus_level", "Focus level", choices = levels_present)
   })
 
@@ -869,10 +891,16 @@ server <- function(input, output, session) {
 
   # Fixed executive-summary strips: every measure a domain has, for CA
   # statewide and LA County side by side.
-  output$headline_scorecard_ca_monthly  <- renderUI(build_headline_scorecard(trend_tables, "Overall",    "monthly"))
-  output$headline_scorecard_la_monthly  <- renderUI(build_headline_scorecard(trend_tables, "LA County",  "monthly"))
-  output$headline_scorecard_ca_rolling  <- renderUI(build_headline_scorecard(trend_tables, "Overall",    "rolling"))
-  output$headline_scorecard_la_rolling  <- renderUI(build_headline_scorecard(trend_tables, "LA County",  "rolling"))
+  # Always shows BOTH geographies side by side regardless of the Trends
+  # tab's own Geography control -- this scorecard is a fixed CA
+  # Statewide vs LA County comparison, not scoped to whatever the user
+  # is currently exploring elsewhere. grouping_label stays "Overall"
+  # for both; `geo` is what picks the geography now that LA County is
+  # a geography scope rather than a pinned grouping value.
+  output$headline_scorecard_ca_monthly  <- renderUI(build_headline_scorecard(trend_tables, "Overall", "monthly", geo = "CA Statewide"))
+  output$headline_scorecard_la_monthly  <- renderUI(build_headline_scorecard(trend_tables, "Overall", "monthly", geo = "LA County"))
+  output$headline_scorecard_ca_rolling  <- renderUI(build_headline_scorecard(trend_tables, "Overall", "rolling", geo = "CA Statewide"))
+  output$headline_scorecard_la_rolling  <- renderUI(build_headline_scorecard(trend_tables, "Overall", "rolling", geo = "LA County"))
   # These 4 are cheap, static reads off trend_tables, so compute all 4 up
   # front rather than waiting on Shiny's suspend-while-hidden default,
   # which would otherwise cause a visible flash the first time someone
@@ -960,7 +988,7 @@ server <- function(input, output, session) {
       !identical(facet_value, "Overall")
     focus_suffix <- function() {
       if (is.null(input$focus_category)) return(NULL)
-      if (input$focus_category %in% c("Overall", "LA County")) return(input$focus_category)
+      if (input$focus_category == "Overall") return(input$focus_category)
       if (is.null(input$focus_level) || !nzchar(input$focus_level)) return(NULL)
       sprintf("%s: %s", input$focus_category, input$focus_level)
     }
@@ -1019,11 +1047,13 @@ server <- function(input, output, session) {
     pins <- facet_pins(facet_value)
     resolved <- resolve_domain_figure(input$domain, input$compare_by, pins$measure, pins$threshold)
     dr <- date_range %||% date_range_picker()
+    req(input$geo_scope)
+    geo <- input$geo_scope
 
     if (identical(facet_value, "Overall")) {
       return(prepare_single_level_panel_data(
         trend_tables, input$domain, resolved$figure_title, "Overall",
-        outcome_label = resolved$outcome_label, date_range = dr
+        outcome_label = resolved$outcome_label, date_range = dr, geo = geo
       ))
     }
     # Checked BEFORE compare_by == "Grouping" below: that branch has no
@@ -1038,27 +1068,27 @@ server <- function(input, output, session) {
       req(input$facet_grouping)
       return(prepare_pinned_level_panel_data(
         trend_tables, input$domain, resolved$figure_title, input$facet_grouping, facet_value,
-        outcome_label = resolved$outcome_label, date_range = dr
+        outcome_label = resolved$outcome_label, date_range = dr, geo = geo
       ))
     }
     if (input$compare_by == "Grouping") {
       req(input$compare_grouping)
       return(prepare_grouping_panel_data(
         trend_tables, input$domain, resolved$figure_title, input$compare_grouping,
-        outcome_label = resolved$outcome_label, date_range = dr
+        outcome_label = resolved$outcome_label, date_range = dr, geo = geo
       ))
     }
     req(input$focus_category)
-    if (input$focus_category %in% c("Overall", "LA County")) {
+    if (input$focus_category == "Overall") {
       prepare_single_level_panel_data(
         trend_tables, input$domain, resolved$figure_title, input$focus_category,
-        outcome_label = resolved$outcome_label, date_range = dr
+        outcome_label = resolved$outcome_label, date_range = dr, geo = geo
       )
     } else {
       req(input$focus_level)
       prepare_pinned_level_panel_data(
         trend_tables, input$domain, resolved$figure_title, input$focus_category, input$focus_level,
-        outcome_label = resolved$outcome_label, date_range = dr
+        outcome_label = resolved$outcome_label, date_range = dr, geo = geo
       )
     }
   }
@@ -1066,11 +1096,11 @@ server <- function(input, output, session) {
   # Every value the facet grid should render a plot for, besides the
   # always-first "Overall" reference. NULL when Facet by == "None".
   facet_values <- reactive({
-    req(input$domain, input$facet_by)
+    req(input$domain, input$facet_by, input$geo_scope)
     if (input$facet_by == "None") return(NULL)
     extra <- if (input$facet_by == "Grouping") {
       req(input$facet_grouping)
-      get_levels_for_grouping(trend_tables, input$domain, input$facet_grouping)
+      get_levels_for_grouping(trend_tables, input$domain, input$facet_grouping, geo = input$geo_scope)
     } else if (input$facet_by == "Measure") {
       get_measure_choices(input$domain)
     } else {
@@ -1789,8 +1819,9 @@ server <- function(input, output, session) {
   })
 
   sample_comparison_table <- reactive({
-    req(sample_description, input$sample_categories)
-    build_sample_description_comparison(sample_description, sample_deduped_windows(), input$sample_categories)
+    req(sample_description, input$sample_categories, input$sample_geo_scope)
+    build_sample_description_comparison(sample_description, sample_deduped_windows(), input$sample_categories,
+                                          geo = input$sample_geo_scope)
   })
 
   output$sample_table <- DT::renderDataTable({
@@ -1864,10 +1895,10 @@ server <- function(input, output, session) {
     local({
       bw <- bin_width
       output[[paste0("fpl_histogram_plot_", bw)]] <- plotly::renderPlotly({
-        req(fpl_distribution, fpl_hist_date_range())
+        req(fpl_distribution, fpl_hist_date_range(), input$sample_geo_scope)
         hist_data <- compute_fpl_histogram(
           fpl_distribution, fpl_hist_date_range(), bw,
-          window_type = input$fpl_hist_window_type, year = input$fpl_hist_year
+          window_type = input$fpl_hist_window_type, year = input$fpl_hist_year, geo = input$sample_geo_scope
         )
         if (nrow(hist_data) == 0) return(empty_plot_message("No FPL data for this time window."))
         build_fpl_histogram_plot(
@@ -1883,11 +1914,11 @@ server <- function(input, output, session) {
   # uses -- a self-contained file that doesn't need the dashboard open
   # alongside it to make sense.
   fpl_hist_meta_data <- reactive({
-    req(fpl_distribution, fpl_hist_date_range(), input$fpl_hist_bin_width)
+    req(fpl_distribution, fpl_hist_date_range(), input$fpl_hist_bin_width, input$sample_geo_scope)
     purrr::map_dfr(sort(as.numeric(input$fpl_hist_bin_width)), function(bw) {
       hist_data <- compute_fpl_histogram(
         fpl_distribution, fpl_hist_date_range(), bw,
-        window_type = input$fpl_hist_window_type, year = input$fpl_hist_year
+        window_type = input$fpl_hist_window_type, year = input$fpl_hist_year, geo = input$sample_geo_scope
       )
       n_part <- attr(hist_data, "total_participants")
       tibble::tibble(
@@ -1905,11 +1936,11 @@ server <- function(input, output, session) {
   })
 
   fpl_hist_table_data <- reactive({
-    req(fpl_distribution, fpl_hist_date_range(), input$fpl_hist_bin_width)
+    req(fpl_distribution, fpl_hist_date_range(), input$fpl_hist_bin_width, input$sample_geo_scope)
     purrr::map_dfr(sort(as.numeric(input$fpl_hist_bin_width)), function(bw) {
       hist_data <- compute_fpl_histogram(
         fpl_distribution, fpl_hist_date_range(), bw,
-        window_type = input$fpl_hist_window_type, year = input$fpl_hist_year
+        window_type = input$fpl_hist_window_type, year = input$fpl_hist_year, geo = input$sample_geo_scope
       )
       if (nrow(hist_data) == 0) return(NULL)
       hist_data %>%

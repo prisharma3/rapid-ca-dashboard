@@ -66,14 +66,33 @@ MASTER_CORE_SNAPSHOT_DIR <- Sys.getenv("MASTER_CORE_SNAPSHOT_DIR", unset = INTER
 N_MIN_OVERALL  <- 50
 N_MIN_SUBGROUP <- 30
 
+# Source (which survey/panel administration a response came through,
+# e.g. "LAEP") is a much finer breakdown than the demographic
+# subgroups above -- some sources have far fewer respondents in a
+# given month -- so it gets its own, lower bar. 10 is intentionally
+# lower than N_MIN_SUBGROUP's 30: tighten this if a specific source
+# turns out too thin to say anything reliable even above 10.
+N_MIN_SOURCE <- 10
+
 # The rolling average is always the fixed trailing 3 calendar months.
 # It never reaches back further to find 3 real months if one is thin
 # or missing. Instead a separate, higher threshold applies to the
 # cumulative sample size across those exact 3 months. If that sum
 # doesn't clear this bar the rolling estimate is suppressed too, even
-# if every individual month passed its own 50/30 threshold.
+# if every individual month passed its own 50/30/10 threshold.
 ROLLING_MIN_OVERALL  <- 100
 ROLLING_MIN_SUBGROUP <- 90
+# 3x the monthly Source threshold, matching the ~3x ratio
+# ROLLING_MIN_SUBGROUP already uses over N_MIN_SUBGROUP (90 vs 30).
+ROLLING_MIN_SOURCE   <- 30
+
+# Month-over-month QC jump checks (R/diagnostics.R:
+# compute_month_over_month_jumps()/compute_sample_composition_shifts()),
+# run once per pipeline run against that run's own fresh output.
+# Percentage POINTS, not a relative/percent change. 10 matches the
+# real incident (a ~10pp Food Insecurity jump in both CA Statewide and
+# LA County with no obvious cause) that prompted adding this check.
+JUMP_CHECK_THRESHOLD_PTS <- 10
 
 # 4. ROLLING AVERAGE WINDOW
 

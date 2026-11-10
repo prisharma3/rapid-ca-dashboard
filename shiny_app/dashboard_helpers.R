@@ -12,9 +12,9 @@ library(dplyr)
 
 #' Levels of `grouping_label` present in this domain's trend data, for the
 #' Focus level dropdown.
-get_levels_for_grouping <- function(trend_tables, domain_key, grouping_label) {
+get_levels_for_grouping <- function(trend_tables, domain_key, grouping_label, geo = "CA Statewide") {
   levels_present <- trend_tables %>%
-    dplyr::filter(domain == domain_key, grouping == grouping_label) %>%
+    dplyr::filter(domain == domain_key, grouping == grouping_label, geo == .env$geo) %>%
     dplyr::pull(level) %>%
     unique()
   order_grouping_levels(levels_present, grouping_label)
@@ -22,11 +22,15 @@ get_levels_for_grouping <- function(trend_tables, domain_key, grouping_label) {
 
 #' Months that exist for one slice of the data, used to constrain the
 #' Investigate tab's month pickers. Suppressed months are included since
-#' they're still real rows.
+#' they're still real rows. geo defaults to "CA Statewide" -- the
+#' Investigate tab doesn't have its own Geography control, so this
+#' always reads the CA-wide rows, same as before LA County became a
+#' geography scope.
 get_available_dates_for_slice <- function(monthly_tables, domain_key, figure_title, grouping_label, level_name,
-                                            outcome_label = NULL) {
+                                            outcome_label = NULL, geo = "CA Statewide") {
   out <- monthly_tables %>%
-    dplyr::filter(domain == domain_key, figure_title == !!figure_title, grouping == grouping_label, level == level_name)
+    dplyr::filter(domain == domain_key, figure_title == !!figure_title, grouping == grouping_label,
+                  level == level_name, geo == .env$geo)
   if (!is.null(outcome_label)) out <- dplyr::filter(out, outcome == outcome_label)
   sort(unique(out$date))
 }
@@ -41,11 +45,16 @@ date_from_month <- function(month_label) {
 #' the August row entirely.
 floor_to_month <- function(d) as.Date(format(as.Date(d), "%Y-%m-01"))
 
-#' Filter the sample_description table to one grouping and date range.
-filter_sample_description <- function(sample_description, grouping_label, date_range) {
+#' Filter the sample_description table to one grouping, date range, and
+#' geography. sample_description.rds now carries a `geo` column
+#' ("CA Statewide"/"LA County") the same way the trend tables do, so
+#' the Sample Description tab can split into its own CA Statewide / LA
+#' County tabs.
+filter_sample_description <- function(sample_description, grouping_label, date_range, geo = "CA Statewide") {
   sample_description %>%
     dplyr::filter(
       grouping == grouping_label,
+      geo == .env$geo,
       date_from_month(month) >= date_range[1],
       date_from_month(month) <= date_range[2]
     )
@@ -59,8 +68,12 @@ FPL_HISTOGRAM_BIN_WIDTH_CHOICES <- c(10, 25, 50, 100)
 #' Re-bucket fpl_distribution.rds's fine grid into coarser bins for one
 #' time window. Lets the dashboard offer an adjustable bin width with no
 #' respondent-level data involved.
-#' @param fpl_distribution build_fpl_distribution_table()'s output:
-#'   list(bins, participants_overall, participants_by_year).
+#' @param fpl_distribution build_fpl_distribution_table_by_geo()'s
+#'   output: list(bins, participants_overall, participants_by_year) --
+#'   bins/participants_by_year each carry a `geo` column,
+#'   participants_overall is a list(`CA Statewide` = ..., `LA County`
+#'   = ...), all filtered down to just `geo` below.
+#' @param geo "CA Statewide" or "LA County".
 #' @param date_range c(start_date, end_date).
 #' @param bin_width Must be an exact multiple of FPL_FINE_BIN_WIDTH.
 #' @param window_type Which time-window control picked date_range --
@@ -82,8 +95,8 @@ FPL_HISTOGRAM_BIN_WIDTH_CHOICES <- c(10, 25, 50, 100)
 #'   -- NA, not an approximate guess, since an approximation here would
 #'   look authoritative without being one).
 compute_fpl_histogram <- function(fpl_distribution, date_range, bin_width,
-                                   window_type = "Custom Date Range", year = NULL) {
-  bins <- fpl_distribution$bins
+                                   window_type = "Custom Date Range", year = NULL, geo = "CA Statewide") {
+  bins <- dplyr::filter(fpl_distribution$bins, geo == .env$geo)
   filtered <- bins %>%
     dplyr::filter(
       date_from_month(month) >= date_range[1],
@@ -92,9 +105,9 @@ compute_fpl_histogram <- function(fpl_distribution, date_range, bin_width,
 
   total_responses <- sum(filtered$n)
   total_participants <- if (identical(window_type, "Overall")) {
-    fpl_distribution$participants_overall
+    fpl_distribution$participants_overall[[geo]]
   } else if (identical(window_type, "By Year") && !is.null(year)) {
-    by_year <- fpl_distribution$participants_by_year
+    by_year <- dplyr::filter(fpl_distribution$participants_by_year, geo == .env$geo)
     match_row <- by_year$n_participants[by_year$survey_year == as.character(year)]
     if (length(match_row) == 0) NA_integer_ else match_row[[1]]
   } else {
@@ -166,14 +179,16 @@ describe_sample_unit <- function(unit) {
 #' @param unit list(type = "overall") | list(type = "month", month = Date)
 #'   | list(type = "survey", survey_type = ..., survey_number = ...).
 #' @param grouping_labels Which categories to include. NULL means all.
-summarize_sample_description_unit <- function(sample_description, unit, grouping_labels = NULL) {
+#' @param geo "CA Statewide" or "LA County" -- which of the Sample
+#'   Description tab's two geography tabs this is for.
+summarize_sample_description_unit <- function(sample_description, unit, grouping_labels = NULL, geo = "CA Statewide") {
   filtered <- switch(unit$type,
-    "overall" = sample_description$overall,
+    "overall" = dplyr::filter(sample_description$overall, geo == .env$geo),
     "month"   = sample_description$by_month %>%
-      dplyr::filter(month == format(unit$month, "%Y/%m")) %>%
+      dplyr::filter(geo == .env$geo, month == format(unit$month, "%Y/%m")) %>%
       dplyr::select(-month),
     "survey"  = sample_description$by_survey %>%
-      dplyr::filter(SurveyType == unit$survey_type, SurveyNumber == unit$survey_number) %>%
+      dplyr::filter(geo == .env$geo, SurveyType == unit$survey_type, SurveyNumber == unit$survey_number) %>%
       dplyr::select(grouping, level, n_participants)
   )
   if (!is.null(grouping_labels)) filtered <- dplyr::filter(filtered, grouping %in% grouping_labels)
@@ -198,9 +213,10 @@ summarize_sample_description_unit <- function(sample_description, unit, grouping
 #' @param category_order Display order for the Category column. Anything
 #'   present in the data but not listed sorts after the listed ones.
 build_sample_description_comparison <- function(sample_description, windows, grouping_labels = NULL,
-                                                  category_order = DEFAULT_SAMPLE_DESCRIPTION_CATEGORY_ORDER) {
+                                                  category_order = DEFAULT_SAMPLE_DESCRIPTION_CATEGORY_ORDER,
+                                                  geo = "CA Statewide") {
   tables <- lapply(windows, function(w) {
-    summarize_sample_description_unit(sample_description, w$unit, grouping_labels) %>%
+    summarize_sample_description_unit(sample_description, w$unit, grouping_labels, geo = geo) %>%
       dplyr::rename(!!w$label := `N (%)`)
   })
   combined <- Reduce(function(a, b) dplyr::full_join(a, b, by = c("Category", "Level")), tables)
@@ -304,9 +320,9 @@ domain_kpi_groups <- function(domain_key) {
 #' @return NULL if no data yet for this geography, otherwise
 #'   list(label, value, delta, date, higher_is_worse). delta is NA with
 #'   no earlier month to compare against.
-compute_kpi_tile <- function(trend_tables, domain_key, spec, grouping_label, series = "monthly") {
+compute_kpi_tile <- function(trend_tables, domain_key, spec, grouping_label, series = "monthly", geo = "CA Statewide") {
   panel <- prepare_single_level_panel_data(
-    trend_tables, domain_key, spec$figure_title, grouping_label, outcome_label = spec$outcome_label
+    trend_tables, domain_key, spec$figure_title, grouping_label, outcome_label = spec$outcome_label, geo = geo
   )
   est_col <- if (series == "monthly") "weighted_prop" else "rolling_weighted_prop"
   ordered <- panel %>% dplyr::filter(!is.na(.data[[est_col]])) %>% dplyr::arrange(date)
@@ -400,13 +416,13 @@ threshold_code_to_label <- function(domain_key, code) {
 #' each clearly its own heading rather than one flat row where the
 #' threshold is buried inside each tile. NULL if none of the domain's
 #' groups have data yet for this geography.
-build_domain_kpi_row <- function(trend_tables, domain_key, grouping_label, series = "monthly") {
+build_domain_kpi_row <- function(trend_tables, domain_key, grouping_label, series = "monthly", geo = "CA Statewide") {
   groups <- domain_kpi_groups(domain_key)
   base_heading <- DOMAIN_FIGURES[[domain_key]]$heading
 
   sub_rows <- lapply(groups, function(group) {
     tiles <- lapply(group$specs, function(spec) {
-      tile <- compute_kpi_tile(trend_tables, domain_key, spec, grouping_label, series)
+      tile <- compute_kpi_tile(trend_tables, domain_key, spec, grouping_label, series, geo = geo)
       if (is.null(tile)) return(NULL)
       render_stat_tile(tile)
     })
@@ -432,10 +448,13 @@ build_domain_kpi_row <- function(trend_tables, domain_key, grouping_label, serie
 
 #' The full headline scorecard for one geography: one KPI row per domain,
 #' in DOMAIN_FIGURES's order, skipping any domain with no data yet.
-#' @param grouping_label "Overall" or "LA County".
-build_headline_scorecard <- function(trend_tables, grouping_label = "Overall", series = "monthly") {
+#' @param grouping_label Always "Overall" here -- which geography this
+#'   scorecard shows is `geo`, not grouping_label; LA County used to
+#'   double as both, but is now a geography scope, not a grouping.
+#' @param geo "CA Statewide" or "LA County".
+build_headline_scorecard <- function(trend_tables, grouping_label = "Overall", series = "monthly", geo = "CA Statewide") {
   rows <- lapply(names(DOMAIN_FIGURES), function(domain_key) {
-    build_domain_kpi_row(trend_tables, domain_key, grouping_label, series)
+    build_domain_kpi_row(trend_tables, domain_key, grouping_label, series, geo = geo)
   })
   rows <- Filter(Negate(is.null), rows)
   if (length(rows) == 0) return(NULL)

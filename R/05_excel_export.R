@@ -265,9 +265,11 @@ write_export_sheet <- function(wb, sheet_name, monthly_all, rolling_all,
 
 
 # Every grouping tab a domain workbook gets: Overall, then each
-# demographic grouping, then LA County (a filter, not a group_by, since
-# it's binary).
-GROUPING_TABS <- c(list(Overall = NULL), GROUPING_VARS)
+# demographic grouping, then Source -- same groupings the dashboard's
+# Trends tab offers (ALL_GROUPING_LABELS). LA County is handled
+# separately below, as its own geography tab, not through this list --
+# it's a geography scope now, not a grouping.
+GROUPING_TABS <- c(list(Overall = NULL), GROUPING_VARS, list(Source = "Source"))
 
 # Finds every level's already-computed trend for one (domain, figure,
 # grouping) cut inside `cuts` (R/06_reporting.R's
@@ -275,8 +277,8 @@ GROUPING_TABS <- c(list(Overall = NULL), GROUPING_VARS)
 # exactly what calc_trend(df, outcome_var, group_var = group_col_name)
 # would have returned directly. No calculation happens here, only
 # relabeling and stacking rows that are already computed.
-# @param group_col_name NULL for Overall/LA County (exactly one level,
-#   no group column needed); the real column name otherwise.
+# @param group_col_name NULL for Overall (exactly one level, no group
+#   column needed); the real column name otherwise.
 combine_cut_levels <- function(cuts, domain_key, figure_title, grouping_label, group_col_name) {
   matching <- Filter(function(cut) {
     !is.null(cut) && identical(cut$domain_key, domain_key) &&
@@ -319,6 +321,20 @@ filter_trend_outcomes <- function(trend, outcome_var_col, outcome_labels) {
 # block is drawn, same as a workbook built from a genuinely
 # single-outcome figure -- a single remaining label isn't worth a
 # section heading of its own.
+#
+# One geography's worth of cuts in, one geography's worth of tabs out
+# -- Overall, then every demographic grouping, then Source, ALL
+# resolved within whichever geography `cuts` came from. This gets
+# called once per geography (see export_domain_figure() below), not
+# once with a combined CA+LA cuts list: each geography needs its own
+# full grouping breakdown (not just a single pinned "LA County" line),
+# and several grouping tab names (e.g. "Dual/Non-Dual Parent
+# Household") already sit right at Excel's 31-character sheet name
+# limit, leaving no room for a "CA - "/"LA - " prefix on the same
+# sheet -- hence two separate files instead of one workbook with twice
+# the tabs.
+#' @param cuts One geography's cuts (build_all_trend_and_monthly_tables_by_geo()'s
+#'   `cuts` for CA Statewide, or `cuts_la` for LA County).
 .export_figure_across_tabs <- function(wb, cuts, domain_key, figure_title,
                                         outcome_var_col = NULL, outcome_labels = NULL) {
   render_outcome_col <- if (!is.null(outcome_var_col) && (is.null(outcome_labels) || length(outcome_labels) != 1)) {
@@ -334,14 +350,11 @@ filter_trend_outcomes <- function(trend, outcome_var_col, outcome_labels) {
     write_export_sheet(wb, tab_label, trend$monthly_all, trend$rolling_all,
                         group_var = group_col, outcome_var_col = render_outcome_col)
   }
-
-  trend_la <- combine_cut_levels(cuts, domain_key, figure_title, "LA County", NULL) %>%
-    filter_trend_outcomes(outcome_var_col, outcome_labels)
-  write_export_sheet(wb, "LA County", trend_la$monthly_all, trend_la$rolling_all, outcome_var_col = render_outcome_col)
 }
 
 # Export one domain figure (e.g. "Material Hardship by Source", filtered
-# to just the "Any" outcome) to one standalone workbook.
+# to just the "Any" outcome) to one standalone workbook, for ONE
+# geography's cuts.
 export_domain_figure <- function(cuts, domain_key, figure_title, output_path,
                                   outcome_var_col = NULL, outcome_labels = NULL) {
   wb <- openxlsx::createWorkbook()
@@ -357,7 +370,7 @@ export_domain_figure <- function(cuts, domain_key, figure_title, output_path,
 # parallel. If one fails, the rest still finish; the failure is
 # surfaced clearly afterward instead of silently stopping everything
 # partway through.
-export_all_domains <- function(cuts, output_dir = EXCEL_OUTPUT_DIR) {
+export_all_domains <- function(cuts, cuts_la, output_dir = EXCEL_OUTPUT_DIR) {
   if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
   path <- function(name) file.path(output_dir, name)
 
@@ -383,22 +396,41 @@ export_all_domains <- function(cuts, output_dir = EXCEL_OUTPUT_DIR) {
     "6_Food_Insecurity"            = list(domain_key = "food_insecurity", figure_title = "Severity (3 Thresholds)", outcome_var_col = "outcome", outcome_labels = NULL)
   )
 
-  cat("  -- exporting", length(jobs_spec), "workbooks across", PIPELINE_CORES, "core(s)...\n")
-  results <- parallel::mclapply(names(jobs_spec), function(job_name) {
+  # Every job_spec runs twice -- once against the CA-wide cuts, once
+  # against the LA-county-only cuts -- producing two separate files
+  # (e.g. "1a_Material_Hardship_Any_CA.xlsx" and
+  # "..._LA.xlsx") rather than one combined workbook. Each file gets
+  # the SAME full set of grouping tabs (Overall, Race, Income Level,
+  # ..., Source), just resolved within that geography -- not a single
+  # "LA County" tab bolted onto the CA workbook.
+  geo_variants <- list(CA = cuts, LA = cuts_la)
+
+  tasks <- do.call(c, lapply(names(jobs_spec), function(job_name) {
+    stats::setNames(
+      lapply(names(geo_variants), function(geo_suffix) list(job_name = job_name, geo_suffix = geo_suffix)),
+      paste0(job_name, "_", names(geo_variants))
+    )
+  }))
+
+  cat("  -- exporting", length(jobs_spec), "workbook(s) x 2 geographies =", length(tasks),
+      "file(s) across", PIPELINE_CORES, "core(s)...\n")
+  results <- parallel::mclapply(tasks, function(task) {
     t0 <- Sys.time()
-    spec <- jobs_spec[[job_name]]
-    export_domain_figure(cuts, spec$domain_key, spec$figure_title, path(paste0(job_name, ".xlsx")),
+    spec <- jobs_spec[[task$job_name]]
+    export_domain_figure(geo_variants[[task$geo_suffix]], spec$domain_key, spec$figure_title,
+                          path(paste0(task$job_name, "_", task$geo_suffix, ".xlsx")),
                           outcome_var_col = spec$outcome_var_col, outcome_labels = spec$outcome_labels)
-    cat(sprintf("     [%s] done, %.1f sec\n", job_name, as.numeric(difftime(Sys.time(), t0, units = "secs"))))
+    cat(sprintf("     [%s_%s] done, %.1f sec\n", task$job_name, task$geo_suffix,
+                as.numeric(difftime(Sys.time(), t0, units = "secs"))))
     NULL
   }, mc.cores = PIPELINE_CORES)
-  names(results) <- names(jobs_spec)
+  names(results) <- names(tasks)
 
   # mclapply() returns a try-error object per failed job rather than
   # halting the other jobs.
   failed <- vapply(results, function(x) inherits(x, "try-error"), logical(1))
   if (any(failed)) {
-    stop("export_all_domains() failed on: ", paste(names(jobs_spec)[failed], collapse = ", "),
+    stop("export_all_domains() failed on: ", paste(names(tasks)[failed], collapse = ", "),
          "\nFirst error: ", attr(results[failed][[1]], "condition")$message)
   }
 
@@ -591,23 +623,38 @@ write_sample_description_sheet <- function(wb, sheet_name, df, time_col, time_or
   write_block("FPL_CONT (% of Poverty Line) -- Distribution (% of responses, not participants)", fpl_histogram_by_time(df, time_col, time_order))
 }
 
+# Writes all 4 of one geography's sheets (Overall, By Year, By Month,
+# By Survey Number), each time cut's own column set recomputed from
+# THAT geography's own df -- so e.g. a survey wave that never reached
+# LA County doesn't show up as an (empty) column on the LA County
+# sheets.
+# @param sheet_prefix Prepended to each of the 4 sheet names (e.g.
+#   "CA - " / "LA - "); openxlsx sheet names cap at 31 characters, so
+#   this has to stay short.
+.write_sample_description_sheets_for_geo <- function(wb, master_analysis, sheet_prefix) {
+  df <- master_analysis %>% dplyr::mutate(.overall_time = "All Years")
+
+  write_sample_description_sheet(wb, paste0(sheet_prefix, "Overall"), df, ".overall_time", "All Years")
+  write_sample_description_sheet(wb, paste0(sheet_prefix, "By Year"), df, "survey_year",
+                                  sort(unique(as.character(df$survey_year))))
+  write_sample_description_sheet(wb, paste0(sheet_prefix, "By Month"), df, "month",
+                                  sort(unique(as.character(df$month))))
+  write_sample_description_sheet(wb, paste0(sheet_prefix, "By Survey Number"), df, "SurveyNumber",
+                                  as.character(sort(unique(df$SurveyNumber))))
+}
+
 # The full Sample Description workbook: Overall (no time split), By
-# Year, By Month, By Survey Number.
+# Year, By Month, By Survey Number -- each duplicated as a CA
+# Statewide set of sheets and an LA County (la_county == 1) set, same
+# split as the dashboard's Sample Description tab's two geography tabs.
 # @param master_analysis master_core after R/01_prep.R (needs Source,
-#   every GROUPING_VARS column, survey_year, month, SurveyNumber, and
-#   FPL_CONT_locf).
+#   every GROUPING_VARS column, survey_year, month, SurveyNumber,
+#   la_county, and FPL_CONT_locf).
 # @param path Output .xlsx path.
 build_sample_description_workbook <- function(master_analysis, path) {
   wb <- openxlsx::createWorkbook()
-  df <- master_analysis %>% dplyr::mutate(.overall_time = "All Years")
-
-  write_sample_description_sheet(wb, "Overall", df, ".overall_time", "All Years")
-  write_sample_description_sheet(wb, "By Year", df, "survey_year",
-                                  sort(unique(as.character(df$survey_year))))
-  write_sample_description_sheet(wb, "By Month", df, "month",
-                                  sort(unique(as.character(df$month))))
-  write_sample_description_sheet(wb, "By Survey Number", df, "SurveyNumber",
-                                  as.character(sort(unique(df$SurveyNumber))))
+  .write_sample_description_sheets_for_geo(wb, master_analysis, "CA - ")
+  .write_sample_description_sheets_for_geo(wb, dplyr::filter(master_analysis, la_county == 1), "LA - ")
 
   openxlsx::saveWorkbook(wb, path, overwrite = TRUE)
   invisible(wb)
