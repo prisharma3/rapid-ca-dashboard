@@ -20,36 +20,6 @@ library(plotly)
 library(htmltools)
 
 
-#' Inserts an explicit NA row for any calendar month missing between
-#' lvl_data's own first and last date -- a real fielding gap (e.g. a
-#' Source not fielded for a few months), as opposed to simply not
-#' having started yet or already having ended, which isn't a gap and
-#' shouldn't get one manufactured at either edge.
-#'
-#' plotly's line traces default to connectgaps = FALSE: an explicit
-#' NA/null value breaks the line visibly right there. Without a row at
-#' all for the missing month (which is what a genuine fielding gap
-#' looks like upstream -- no respondents that month means no row, not
-#' a suppressed-but-present one), plotly has nothing to break on and
-#' instead draws one continuous straight line from the last real point
-#' straight to the next one, months later -- visually indistinguishable
-#' from an actual gradual trend, even though there's no data there at
-#' all.
-#' @param lvl_data One level's already date-filtered, date-sorted rows
-#'   (level, date, est, low, high, n).
-fill_date_gaps <- function(lvl_data) {
-  if (nrow(lvl_data) < 2) return(lvl_data)
-  full_months <- seq(floor_to_month_start(min(lvl_data$date)), floor_to_month_start(max(lvl_data$date)), by = "1 month")
-  missing_months <- full_months[!full_months %in% lvl_data$date]
-  if (length(missing_months) == 0) return(lvl_data)
-
-  gap_rows <- tibble::tibble(
-    level = lvl_data$level[[1]], date = missing_months,
-    est = NA_real_, low = NA_real_, high = NA_real_, n = NA_integer_
-  )
-  dplyr::bind_rows(lvl_data, gap_rows) %>% dplyr::arrange(date)
-}
-
 #' The HTML title+caption markup a plot's title uses. Factored out so
 #' app.R's live window-caption updater can push a fresh title into an
 #' already-rendered plot with the same markup.
@@ -124,7 +94,7 @@ build_interactive_trend_plot <- function(data, series = c("monthly", "rolling"),
   p <- if (is.null(source_id)) plotly::plot_ly() else plotly::plot_ly(source = source_id)
 
   for (lvl in levels_present) {
-    lvl_data <- plot_data %>% dplyr::filter(level == lvl) %>% dplyr::arrange(date) %>% fill_date_gaps()
+    lvl_data <- plot_data %>% dplyr::filter(level == lvl) %>% dplyr::arrange(date)
     color <- unname(color_map[lvl])
 
     if (draw_ci) {
@@ -138,17 +108,17 @@ build_interactive_trend_plot <- function(data, series = c("monthly", "rolling"),
     # Built as a plain vector here, not a plotly formula, because a
     # formula referencing `lvl` would evaluate lazily and every trace
     # would end up showing the loop's final value instead of its own.
-    # NA for a fill_date_gaps()-inserted gap row -- no marker gets drawn
-    # there anyway (no y value to plot), but this keeps its hover text
-    # from reading "NA%" on the off chance it's ever reachable.
-    hover_text <- ifelse(
-      is.na(lvl_data$est), NA_character_,
-      sprintf("%s<br>%s: %.1f%%<br>n = %d", lvl, format(lvl_data$date, "%B %Y"), lvl_data$est * 100, lvl_data$n)
-    )
+    hover_text <- sprintf("%s<br>%s: %.1f%%<br>n = %d", lvl, format(lvl_data$date, "%B %Y"),
+                           lvl_data$est * 100, lvl_data$n)
 
+    # A dropped/suppressed month just isn't a row here at all (plot_data
+    # already filtered those out above) -- connectgaps defaults to
+    # FALSE, but with no gap rows to break on, the line simply skips
+    # straight from one real point to the next instead of showing a
+    # visible break.
     p <- p %>% plotly::add_trace(
       data = lvl_data, x = ~date, y = ~est * 100, type = "scatter", mode = "lines+markers",
-      name = lvl, showlegend = !single_level, connectgaps = FALSE,
+      name = lvl, showlegend = !single_level,
       line = list(color = color, width = 2), marker = list(color = color, size = 6),
       text = hover_text,
       hoverinfo = "text"
