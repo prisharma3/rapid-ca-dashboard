@@ -443,6 +443,7 @@ ui <- function(request) navbarPage(
             uiOutput("measure_pin_ui"),
             uiOutput("threshold_pin_ui"),
             uiOutput("compare_grouping_ui"),
+            uiOutput("compare_grouping_source_pick_ui"),
             uiOutput("facet_grouping_ui"),
             uiOutput("focus_control_ui")
           ),
@@ -857,6 +858,24 @@ server <- function(input, output, session) {
     selectInput("compare_grouping", "Grouping (shown as lines)", choices = GROUPING_CHOICES)
   })
 
+  # Source has far more levels (dozens) than every other grouping (at
+  # most 4) -- plotting all of them as lines on one chart pushes the
+  # legend down over the plot area itself. Shown only when Source is
+  # the grouping being plotted as lines, letting the user narrow it to
+  # a readable number instead. maxItems = 4 matches what every other
+  # grouping already shows by default, so a source-heavy panel reads
+  # the same as any other.
+  output$compare_grouping_source_pick_ui <- renderUI({
+    req(input$compare_by, input$compare_grouping, input$domain, input$geo_scope)
+    if (input$compare_by != "Grouping" || input$compare_grouping != "Source") return(NULL)
+    choices <- get_levels_for_grouping(trend_tables, input$domain, "Source", geo = input$geo_scope)
+    selectizeInput(
+      "compare_grouping_source_pick", "Which sources to show (up to 4)",
+      choices = choices, selected = utils::head(choices, 4), multiple = TRUE,
+      options = list(maxItems = 4, plugins = list("remove_button"))
+    )
+  })
+
   # Which grouping is split into separate plots, when Grouping is the
   # facet axis.
   output$facet_grouping_ui <- renderUI({
@@ -1075,10 +1094,19 @@ server <- function(input, output, session) {
     }
     if (input$compare_by == "Grouping") {
       req(input$compare_grouping)
-      return(prepare_grouping_panel_data(
+      out <- prepare_grouping_panel_data(
         trend_tables, input$domain, resolved$figure_title, input$compare_grouping,
         outcome_label = resolved$outcome_label, date_range = dr, geo = geo
-      ))
+      )
+      # Source can have dozens of levels, unlike every other grouping
+      # (at most 4) -- narrowed to the picker's selection so the legend
+      # never grows past what one plot can show without covering the
+      # chart itself.
+      if (input$compare_grouping == "Source") {
+        req(input$compare_grouping_source_pick)
+        out <- dplyr::filter(out, as.character(level) %in% input$compare_grouping_source_pick)
+      }
+      return(out)
     }
     req(input$focus_category)
     if (input$focus_category == "Overall") {
