@@ -168,9 +168,14 @@ ACS_TARGETS_RPR <- list(
 # Immigrant = first generation (born outside the US) or second
 # generation (born in the US to immigrant parents); Non-immigrant =
 # third generation or later.
+# Income Level (2-Level) is poverty_200_cat, already built in
+# R/01_prep.R from FPL_CONT_locf at the 200% FPL policy threshold --
+# not a new recode, just exposing an existing final column as its own
+# grouping, same as "Income Level" already does for poverty_cat.
 GROUPING_VARS <- list(
   "Race"                             = "race_group_4cat",
   "Income Level"                     = "poverty_cat",
+  "Income Level (2-Level)"           = "poverty_200_cat",
   "CA Region"                        = "ca_region",
   "Household Child Age"              = "hh_child_age_mix",
   "Child Disability"                 = "disability_locf",
@@ -200,6 +205,7 @@ POVERTY_200_CAT_LEVELS <- c("At or Below 200% FPL", "Above 200% FPL")
 # listed falls back to a plain alphabetical sort.
 GROUPING_LEVEL_ORDER <- list(
   "Income Level" = POVERTY_CAT_LEVELS,
+  "Income Level (2-Level)" = POVERTY_200_CAT_LEVELS,
   # Generational order (most to least recent immigration), not alphabetical.
   "Immigration Status" = c(
     "Born outside US",
