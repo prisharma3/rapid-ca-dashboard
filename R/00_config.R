@@ -159,15 +159,24 @@ ACS_TARGETS_RPR <- list(
 # 6. GROUPING VARIABLES
 
 # The confirmed demographic breakdowns this pipeline reports.
-# Race, CA Region, and Income Level come from imputed-and-LOCF'd columns. 
+# Race, CA Region, and Income Level come from imputed-and-LOCF'd columns.
 # The other three have no imputed tier and come from LOCF-only columns.
+# Immigration Status and Immigrant Status both come from
+# immigration_status_locf (the LOCF'd final version, same as every
+# other "_locf" grouping here) -- Immigrant Status is that same column
+# collapsed to 2 levels (R/01_prep.R's add_immigrant_2cat_recode()):
+# Immigrant = first generation (born outside the US) or second
+# generation (born in the US to immigrant parents); Non-immigrant =
+# third generation or later.
 GROUPING_VARS <- list(
   "Race"                             = "race_group_4cat",
   "Income Level"                     = "poverty_cat",
   "CA Region"                        = "ca_region",
   "Household Child Age"              = "hh_child_age_mix",
   "Child Disability"                 = "disability_locf",
-  "Dual/Non-Dual Parent Household"   = "single_parent_locf"
+  "Dual/Non-Dual Parent Household"   = "single_parent_locf",
+  "Immigration Status"               = "immigration_status_locf",
+  "Immigrant Status"                 = "immigrant_2cat_locf"
 )
 
 # Display order for a sample-description table's Category column.
@@ -190,7 +199,15 @@ POVERTY_200_CAT_LEVELS <- c("At or Below 200% FPL", "Above 200% FPL")
 # ends up last), so its order is spelled out here. Any grouping not
 # listed falls back to a plain alphabetical sort.
 GROUPING_LEVEL_ORDER <- list(
-  "Income Level" = POVERTY_CAT_LEVELS
+  "Income Level" = POVERTY_CAT_LEVELS,
+  # Generational order (most to least recent immigration), not alphabetical.
+  "Immigration Status" = c(
+    "Born outside US",
+    "Born in US to immigrant parents",
+    "Born in US to US parents & immigrant grandparents",
+    "Born in US to US parents & grandparents"
+  ),
+  "Immigrant Status" = c("Immigrant", "Non-immigrant")
 )
 
 #' Order a grouping's level values for display.
